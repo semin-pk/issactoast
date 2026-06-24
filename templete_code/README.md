@@ -33,6 +33,8 @@ project/
 | visualize.py                 | 적재 결과 시각화           
 | requirements.txt             | Python 패키지 목록       
 | config/algorithm_config.yaml | 알고리즘 설정             
+| ALGORITHM_CHANGELOG.md       | 알고리즘 변경 이력 및 현재 구현 설명
+| EVALUATION_GUIDE.md          | evaluate.py / physics_check.py 실행 가이드
 | box_sequence/                | 입력 박스 시퀀스           
 | algorithm_results/           | 결과 저장 디렉토리          
 

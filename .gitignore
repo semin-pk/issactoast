@@ -1,0 +1,56 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python cache / build artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+**/.venv/
+**/.venv_py314_backup/
+
+# Local editor / IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archives and exported bundles
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Generated algorithm/evaluation outputs
+templete_code/algorithm_results/
+templete_code/benchmark_log.csv
+templete_code/eval_report.json
+templete_code/eval_tmp/
+
+# Generated simulator outputs
+palletizing_simulator/algorithm_results/
+palletizing_simulator/sim_results/
+palletizing_simulator/screenshots/
+
+# Temporary or duplicate extracted folders
+Heightmap + */
+templete code/
+
+# Local logs
+*.log
