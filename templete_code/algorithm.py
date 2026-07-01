@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, TypedDict
+from typing import Dict, List, Optional, Sequence, Tuple, TypedDict
 
 import numpy as np
 import yaml
@@ -88,6 +88,39 @@ class HeuristicConfig:
 
 
 @dataclass
+class PhysicsMaskConfig:
+    """Fail 위험 후보를 점수화 전에 제거하는 하드 제약 묶음."""
+
+    enabled: bool = True
+    com_margin_m: float = 0.01
+    corner_tolerance_m: float = 0.025
+    min_supported_corners: int = 2
+    min_supported_edges: int = 2
+    lower_load_limit_ratio: float = 4.0
+    top_load_limit_ratio: float = 3.0
+    load_safety_margin: float = 0.85
+    debug_recompute_loads: bool = False
+
+
+@dataclass
+class StopPolicyConfig:
+    """부분 적재를 확정하고 종료할지 결정하는 정책."""
+
+    stop_when_no_safe_candidate: bool = True
+
+
+@dataclass
+class PolicyInferenceConfig:
+    """ONNX 정책망 추천기 설정. 실패하면 휴리스틱 fallback을 사용한다."""
+
+    enabled: bool = False
+    model_path: str = "models/policy_net.onnx"
+    top_k: int = 32
+    fallback_to_heuristic: bool = True
+    stop_if_no_safe_action: bool = True
+
+
+@dataclass
 class Candidate:
     """평가를 통과한 배치 후보 하나.
 
@@ -121,6 +154,17 @@ class PlacedAABB:
     x1: float
     y1: float
     z1: float
+    mass: float = 0.0
+    load_on_top: float = 0.0
+    supported_by: Tuple[int, ...] = ()
+
+
+@dataclass
+class SupportGeometry:
+    rects: List[Tuple[float, float, float, float]]
+    supporters: List[Tuple[int, float]]
+    support_area: float
+    footprint_area: float
 
 
 class Palletizer:
@@ -135,7 +179,14 @@ class Palletizer:
     def __init__(self, pallet_cfg: PalletConfig, algo_cfg: AlgorithmConfig) -> None:
         self.pallet = pallet_cfg
         self.algo = algo_cfg
-        self.heuristic = self._load_heuristic_config()
+        (
+            self.heuristic,
+            self.physics_mask,
+            self.stop_policy,
+            self.policy_inference,
+        ) = self._load_algorithm_tuning()
+        self._policy_model = None
+        self._init_policy_model()
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -152,6 +203,9 @@ class Palletizer:
         self.sequence: List[PlacedBox] = []
         self._placed_aabbs: List[PlacedAABB] = []
         self._consecutive_failures = 0
+        self._policy_attempts = 0
+        self._policy_successes = 0
+        self._policy_fallbacks = 0
 
         self.finished = False
         self.terminated_step: Optional[int] = None
@@ -161,8 +215,15 @@ class Palletizer:
     # 설정 로드
     # -----------------------------------------------------------------------
 
-    def _load_heuristic_config(self) -> HeuristicConfig:
-        """config/algorithm_config.yaml에서 heuristic 값을 읽는다.
+    def _load_algorithm_tuning(
+        self,
+    ) -> Tuple[
+        HeuristicConfig,
+        PhysicsMaskConfig,
+        StopPolicyConfig,
+        PolicyInferenceConfig,
+    ]:
+        """config/algorithm_config.yaml에서 튜닝 값을 읽는다.
 
         main.py의 AlgorithmConfig 생성 코드는 기존 구조를 유지해야 하므로,
         추가 튜닝 파라미터는 Palletizer가 직접 YAML을 읽어 로드한다.
@@ -170,16 +231,22 @@ class Palletizer:
         """
 
         cfg = HeuristicConfig()
+        physics_cfg = PhysicsMaskConfig()
+        stop_cfg = StopPolicyConfig()
+        policy_cfg = PolicyInferenceConfig()
         config_path = Path(__file__).resolve().parent / "config" / "algorithm_config.yaml"
 
         if not config_path.exists():
-            return cfg
+            return cfg, physics_cfg, stop_cfg, policy_cfg
 
         with config_path.open("r", encoding="utf-8") as f:
             root = yaml.safe_load(f) or {}
 
         heuristic = root.get("heuristic", {})
         weights = heuristic.get("weights", {})
+        physics = root.get("physics_mask", {})
+        stop_policy = root.get("stop_policy", {})
+        policy = root.get("policy_inference", {})
 
         cfg.grid_resolution_m = float(
             heuristic.get("grid_resolution_m", cfg.grid_resolution_m)
@@ -206,7 +273,77 @@ class Palletizer:
             w_flat=float(weights.get("w_flat", cfg.weights.w_flat)),
             w_mass=float(weights.get("w_mass", cfg.weights.w_mass)),
         )
-        return cfg
+        physics_cfg = PhysicsMaskConfig(
+            enabled=bool(physics.get("enabled", physics_cfg.enabled)),
+            com_margin_m=float(physics.get("com_margin_m", physics_cfg.com_margin_m)),
+            corner_tolerance_m=float(
+                physics.get("corner_tolerance_m", physics_cfg.corner_tolerance_m)
+            ),
+            min_supported_corners=int(
+                physics.get("min_supported_corners", physics_cfg.min_supported_corners)
+            ),
+            min_supported_edges=int(
+                physics.get("min_supported_edges", physics_cfg.min_supported_edges)
+            ),
+            lower_load_limit_ratio=float(
+                physics.get("lower_load_limit_ratio", physics_cfg.lower_load_limit_ratio)
+            ),
+            top_load_limit_ratio=float(
+                physics.get("top_load_limit_ratio", physics_cfg.top_load_limit_ratio)
+            ),
+            load_safety_margin=float(
+                physics.get("load_safety_margin", physics_cfg.load_safety_margin)
+            ),
+            debug_recompute_loads=bool(
+                physics.get("debug_recompute_loads", physics_cfg.debug_recompute_loads)
+            ),
+        )
+        stop_cfg = StopPolicyConfig(
+            stop_when_no_safe_candidate=bool(
+                stop_policy.get(
+                    "stop_when_no_safe_candidate",
+                    stop_cfg.stop_when_no_safe_candidate,
+                )
+            )
+        )
+        policy_cfg = PolicyInferenceConfig(
+            enabled=bool(policy.get("enabled", policy_cfg.enabled)),
+            model_path=str(policy.get("model_path", policy_cfg.model_path)),
+            top_k=int(policy.get("top_k", policy_cfg.top_k)),
+            fallback_to_heuristic=bool(
+                policy.get("fallback_to_heuristic", policy_cfg.fallback_to_heuristic)
+            ),
+            stop_if_no_safe_action=bool(
+                policy.get("stop_if_no_safe_action", policy_cfg.stop_if_no_safe_action)
+            ),
+        )
+        return cfg, physics_cfg, stop_cfg, policy_cfg
+
+    def _init_policy_model(self) -> None:
+        if not self.policy_inference.enabled:
+            return
+
+        try:
+            from src.policy_inference import PolicyModel
+        except Exception as exc:
+            print(f"[WARN] policy inference unavailable, using heuristic fallback: {exc}")
+            return
+
+        model_path = Path(self.policy_inference.model_path)
+        if not model_path.is_absolute():
+            model_path = Path(__file__).resolve().parent / model_path
+        if not model_path.exists():
+            print(f"[WARN] policy model not found: {model_path}. using heuristic fallback")
+            return
+
+        try:
+            self._policy_model = PolicyModel(
+                model_path=model_path,
+                top_k=max(1, int(self.policy_inference.top_k)),
+            )
+        except Exception as exc:
+            print(f"[WARN] policy model load failed, using heuristic fallback: {exc}")
+            self._policy_model = None
 
     # -----------------------------------------------------------------------
     # 참가자 수정 가능 함수
@@ -407,6 +544,209 @@ class Palletizer:
 
         return min(support_area / footprint_area, 1.0)
 
+    def _support_geometry(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        dims: Tuple[float, float, float],
+    ) -> SupportGeometry:
+        """회전 적용 후 footprint 기준의 실제 지지 사각형을 계산한다."""
+
+        dx, dy, _ = dims
+        footprint_area = dx * dy
+        if footprint_area <= 0.0:
+            return SupportGeometry([], [], 0.0, 0.0)
+
+        x1 = x + dx
+        y1 = y + dy
+        if z <= self.heuristic.support_z_tol_m:
+            return SupportGeometry(
+                rects=[(x, y, x1, y1)],
+                supporters=[],
+                support_area=footprint_area,
+                footprint_area=footprint_area,
+            )
+
+        rects: List[Tuple[float, float, float, float]] = []
+        supporters: List[Tuple[int, float]] = []
+
+        for idx, placed in enumerate(self._placed_aabbs):
+            if abs(placed.z1 - z) > self.heuristic.support_z_tol_m:
+                continue
+
+            overlap_x = max(0.0, min(x1, placed.x1) - max(x, placed.x0))
+            overlap_y = max(0.0, min(y1, placed.y1) - max(y, placed.y0))
+            area = overlap_x * overlap_y
+            if area <= 0.0:
+                continue
+
+            rects.append((
+                max(x, placed.x0),
+                max(y, placed.y0),
+                min(x1, placed.x1),
+                min(y1, placed.y1),
+            ))
+            supporters.append((idx, area))
+
+        return SupportGeometry(
+            rects=rects,
+            supporters=supporters,
+            support_area=self._union_area_rectangles(rects),
+            footprint_area=footprint_area,
+        )
+
+    @staticmethod
+    def _union_area_rectangles(rects: Sequence[Tuple[float, float, float, float]]) -> float:
+        if not rects:
+            return 0.0
+
+        xs = sorted({rect[0] for rect in rects} | {rect[2] for rect in rects})
+        area = 0.0
+        for x0, x1 in zip(xs, xs[1:]):
+            if x1 <= x0:
+                continue
+            intervals: List[Tuple[float, float]] = []
+            for rx0, ry0, rx1, ry1 in rects:
+                if rx0 < x1 and rx1 > x0:
+                    intervals.append((ry0, ry1))
+            if not intervals:
+                continue
+            intervals.sort()
+            cur0, cur1 = intervals[0]
+            covered_y = 0.0
+            for y0, y1 in intervals[1:]:
+                if y0 <= cur1:
+                    cur1 = max(cur1, y1)
+                else:
+                    covered_y += cur1 - cur0
+                    cur0, cur1 = y0, y1
+            covered_y += cur1 - cur0
+            area += (x1 - x0) * covered_y
+        return area
+
+    @staticmethod
+    def _point_in_any_rect(
+        px: float,
+        py: float,
+        rects: Sequence[Tuple[float, float, float, float]],
+        margin: float,
+    ) -> bool:
+        for x0, y0, x1, y1 in rects:
+            if x0 + margin <= px <= x1 - margin and y0 + margin <= py <= y1 - margin:
+                return True
+        return False
+
+    @staticmethod
+    def _point_in_support_bounds(
+        px: float,
+        py: float,
+        rects: Sequence[Tuple[float, float, float, float]],
+        margin: float,
+    ) -> bool:
+        if not rects:
+            return False
+        x0 = min(rect[0] for rect in rects) + margin
+        y0 = min(rect[1] for rect in rects) + margin
+        x1 = max(rect[2] for rect in rects) - margin
+        y1 = max(rect[3] for rect in rects) - margin
+        return x0 <= px <= x1 and y0 <= py <= y1
+
+    def _corner_edge_support_ok(
+        self,
+        x: float,
+        y: float,
+        dims: Tuple[float, float, float],
+        rects: Sequence[Tuple[float, float, float, float]],
+    ) -> bool:
+        dx, dy, _ = dims
+        tol = self.physics_mask.corner_tolerance_m
+        corners = [
+            (x, y),
+            (x + dx, y),
+            (x, y + dy),
+            (x + dx, y + dy),
+        ]
+        supported_corners = 0
+        for cx, cy in corners:
+            if self._point_in_any_rect(cx, cy, rects, -tol):
+                supported_corners += 1
+
+        if supported_corners < self.physics_mask.min_supported_corners:
+            return False
+
+        edge_midpoints = [
+            (x + dx / 2.0, y),
+            (x + dx / 2.0, y + dy),
+            (x, y + dy / 2.0),
+            (x + dx, y + dy / 2.0),
+        ]
+        supported_edges = 0
+        for ex, ey in edge_midpoints:
+            if self._point_in_any_rect(ex, ey, rects, -tol):
+                supported_edges += 1
+
+        return supported_edges >= self.physics_mask.min_supported_edges
+
+    def _candidate_load_ok(self, mass: float, support: SupportGeometry) -> bool:
+        if not support.supporters or support.support_area <= 0.0:
+            return True
+
+        for idx, area in support.supporters:
+            placed = self._placed_aabbs[idx]
+            share = mass * (area / support.support_area)
+            lower_limit = (
+                placed.mass
+                * self.physics_mask.lower_load_limit_ratio
+                * self.physics_mask.load_safety_margin
+            )
+            top_limit = (
+                placed.mass
+                * self.physics_mask.top_load_limit_ratio
+                * self.physics_mask.load_safety_margin
+            )
+            load_limit = min(lower_limit, top_limit)
+            if placed.load_on_top + share > load_limit + 1e-9:
+                return False
+        return True
+
+    def _physics_mask_ok(
+        self,
+        box: BoxInput,
+        x: float,
+        y: float,
+        z: float,
+        dims: Tuple[float, float, float],
+        support: SupportGeometry,
+    ) -> bool:
+        """COM/corner/load 하드 게이트. 통과 못 하면 후보에서 제거한다."""
+
+        if not self.physics_mask.enabled:
+            return True
+        if support.footprint_area <= 0.0:
+            return False
+
+        support_ratio = support.support_area / support.footprint_area
+        if support_ratio + 1e-9 < self.heuristic.support_threshold:
+            return False
+
+        dx, dy, _ = dims
+        cx = x + dx / 2.0
+        cy = y + dy / 2.0
+        margin = self.physics_mask.com_margin_m
+        if not self._point_in_support_bounds(cx, cy, support.rects, margin):
+            return False
+
+        if z > self.heuristic.support_z_tol_m:
+            if not self._corner_edge_support_ok(x, y, dims, support.rects):
+                return False
+
+        mass = float(box.get("mass", 0.0))
+        if mass < 0.0:
+            return False
+
+        return self._candidate_load_ok(mass, support)
+
     def _score_candidate(
         self,
         box: BoxInput,
@@ -489,10 +829,18 @@ class Palletizer:
         # 받쳐주는 셀이다. 이 비율이 낮으면 박스가 한쪽 모서리에 걸친 상태가 된다.
         support_mask = np.abs(region - z) <= self.heuristic.support_z_tol_m
         cell_support_ratio = float(np.count_nonzero(support_mask) / region.size)
-        exact_support_ratio = self._exact_support_ratio(x, y, z, dims)
+        support = self._support_geometry(x, y, z, dims)
+        exact_support_ratio = (
+            support.support_area / support.footprint_area
+            if support.footprint_area > 0.0
+            else 0.0
+        )
         support_ratio = min(cell_support_ratio, exact_support_ratio)
 
         if support_ratio + 1e-9 < self.heuristic.support_threshold:
+            return None
+
+        if not self._physics_mask_ok(box, x, y, z, dims, support):
             return None
 
         if self._aabb_intersects_existing(x, y, z, dims):
@@ -557,6 +905,180 @@ class Palletizer:
                             best = candidate
 
         return best
+
+    def _grid_xy_from_indices(self, x_index: int, y_index: int) -> Tuple[float, float]:
+        return (
+            round(float(x_index) * self.grid_resolution, 6),
+            round(float(y_index) * self.grid_resolution, 6),
+        )
+
+    def _rotation_index_for_degrees(self, rotation: int) -> int:
+        return 1 if int(rotation) == 90 else 0
+
+    def _orientation_for_rotation_index(
+        self,
+        box: BoxInput,
+        rotation_index: int,
+    ) -> Optional[Tuple[Tuple[float, float, float], int]]:
+        for dims, rotation in self._candidate_orientations(box["size"]):
+            if self._rotation_index_for_degrees(rotation) == int(rotation_index):
+                return dims, rotation
+        return None
+
+    def _candidate_from_action(
+        self,
+        indexed_boxes: List[Tuple[int, BoxInput]],
+        buffer_index: int,
+        rotation_index: int,
+        x_index: int,
+        y_index: int,
+    ) -> Optional[Candidate]:
+        box: Optional[BoxInput] = None
+        for candidate_buffer_index, candidate_box in indexed_boxes:
+            if int(candidate_buffer_index) == int(buffer_index):
+                box = candidate_box
+                break
+        if box is None:
+            return None
+
+        orientation = self._orientation_for_rotation_index(box, rotation_index)
+        if orientation is None:
+            return None
+        dims, rotation = orientation
+        x, y = self._grid_xy_from_indices(x_index, y_index)
+        return self._evaluate_candidate(
+            box=box,
+            buffer_index=buffer_index,
+            dims=dims,
+            rotation=rotation,
+            x=x,
+            y=y,
+        )
+
+    def _best_grid_candidate(
+        self,
+        indexed_boxes: List[Tuple[int, BoxInput]],
+    ) -> Tuple[Optional[Candidate], Optional[Tuple[int, int, int, int]]]:
+        best: Optional[Candidate] = None
+        best_action: Optional[Tuple[int, int, int, int]] = None
+
+        for buffer_index, box in indexed_boxes:
+            for dims, rotation in self._candidate_orientations(box["size"]):
+                rotation_index = self._rotation_index_for_degrees(rotation)
+                for y_index in range(self.n_rows):
+                    for x_index in range(self.n_cols):
+                        x, y = self._grid_xy_from_indices(x_index, y_index)
+                        candidate = self._evaluate_candidate(
+                            box=box,
+                            buffer_index=buffer_index,
+                            dims=dims,
+                            rotation=rotation,
+                            x=x,
+                            y=y,
+                        )
+                        if candidate is None:
+                            continue
+                        if best is None or self._is_better_candidate(candidate, best):
+                            best = candidate
+                            best_action = (buffer_index, rotation_index, x_index, y_index)
+
+        return best, best_action
+
+    def policy_state(
+        self,
+        indexed_boxes: List[Tuple[int, BoxInput]],
+    ) -> Dict[str, np.ndarray]:
+        """Return normalized inputs shared by data collection and ONNX inference."""
+
+        max_buffer = max(int(self.algo.buffer_size), len(indexed_boxes), 1)
+        height_map = (self.heightmap / max(float(self.pallet.height), 1e-9)).astype(np.float32)
+        height_map = height_map.reshape(1, self.n_rows, self.n_cols)
+
+        buffer_features = np.zeros((max_buffer, 6), dtype=np.float32)
+        action_mask = np.zeros((max_buffer, 2, self.n_rows, self.n_cols), dtype=np.float32)
+
+        for buffer_index, box in indexed_boxes:
+            if buffer_index >= max_buffer:
+                continue
+            sx, sy, sz = [float(value) for value in box["size"]]
+            mass = float(box.get("mass", 0.0))
+            volume = sx * sy * sz
+            buffer_features[buffer_index] = np.asarray([
+                sx / max(float(self.pallet.length), 1e-9),
+                sy / max(float(self.pallet.width), 1e-9),
+                sz / max(float(self.pallet.height), 1e-9),
+                mass / 6.0,
+                volume / max(float(self.pallet.length * self.pallet.width * self.pallet.height), 1e-9),
+                mass / 6.0,
+            ], dtype=np.float32)
+
+            for dims, rotation in self._candidate_orientations(box["size"]):
+                rotation_index = self._rotation_index_for_degrees(rotation)
+                for y_index in range(self.n_rows):
+                    for x_index in range(self.n_cols):
+                        x, y = self._grid_xy_from_indices(x_index, y_index)
+                        candidate = self._evaluate_candidate(
+                            box=box,
+                            buffer_index=buffer_index,
+                            dims=dims,
+                            rotation=rotation,
+                            x=x,
+                            y=y,
+                        )
+                        if candidate is not None:
+                            action_mask[buffer_index, rotation_index, y_index, x_index] = 1.0
+
+        return {
+            "height_map": height_map,
+            "buffer_features": buffer_features,
+            "action_mask": action_mask,
+        }
+
+    def _policy_candidate(
+        self,
+        indexed_boxes: List[Tuple[int, BoxInput]],
+    ) -> Optional[Candidate]:
+        if not self.policy_inference.enabled or self._policy_model is None:
+            return None
+
+        self._policy_attempts += 1
+        state = self.policy_state(indexed_boxes)
+        if float(np.sum(state["action_mask"])) <= 0.0:
+            return None
+
+        try:
+            actions = self._policy_model.recommend(
+                height_map=state["height_map"],
+                buffer_features=state["buffer_features"],
+                action_mask=state["action_mask"],
+            )
+        except Exception as exc:
+            print(f"[WARN] policy inference failed, using heuristic fallback: {exc}")
+            return None
+
+        for buffer_index, rotation_index, y_index, x_index, _score in actions:
+            candidate = self._candidate_from_action(
+                indexed_boxes=indexed_boxes,
+                buffer_index=int(buffer_index),
+                rotation_index=int(rotation_index),
+                x_index=int(x_index),
+                y_index=int(y_index),
+            )
+            if candidate is not None:
+                self._policy_successes += 1
+                return candidate
+
+        return None
+
+    def _select_candidate(self, indexed_boxes: List[Tuple[int, BoxInput]]) -> Optional[Candidate]:
+        policy_candidate = self._policy_candidate(indexed_boxes)
+        if policy_candidate is not None:
+            return policy_candidate
+        if self.policy_inference.enabled and not self.policy_inference.fallback_to_heuristic:
+            return None
+        if self.policy_inference.enabled:
+            self._policy_fallbacks += 1
+        return self._best_candidate(indexed_boxes)
 
     def _is_better_candidate(self, candidate: Candidate, best: Candidate) -> bool:
         """두 후보를 비교한다.
@@ -625,6 +1147,8 @@ class Palletizer:
             "rotation": int(rotation),
         })
 
+        support = self._support_geometry(x, y, z, dims)
+        new_index = len(self._placed_aabbs)
         self._placed_aabbs.append(
             PlacedAABB(
                 x0=x,
@@ -633,13 +1157,58 @@ class Palletizer:
                 x1=x + dx,
                 y1=y + dy,
                 z1=z + dz,
+                mass=float(box["mass"]),
+                load_on_top=0.0,
+                supported_by=tuple(idx for idx, _ in support.supporters),
             )
         )
+        self._apply_supported_load(new_index, float(box["mass"]), support)
 
         row_slice, col_slice = self._cell_slice(x, y, dx, dy)
         # 후보 footprint 영역의 새 윗면 높이는 박스 top z이다.
         # 이후 박스는 이 갱신된 heightmap을 기준으로 다시 z_place를 계산한다.
         self.heightmap[row_slice, col_slice] = z + dz
+
+        if self.physics_mask.debug_recompute_loads:
+            self._assert_incremental_loads_match_recompute()
+
+    def _apply_supported_load(
+        self,
+        placed_index: int,
+        mass: float,
+        support: SupportGeometry,
+    ) -> None:
+        if not support.supporters or support.support_area <= 0.0:
+            return
+
+        for supporter_idx, area in support.supporters:
+            if supporter_idx == placed_index:
+                continue
+            self._placed_aabbs[supporter_idx].load_on_top += mass * (
+                area / support.support_area
+            )
+
+    def _recompute_loads(self) -> List[float]:
+        loads = [0.0 for _ in self._placed_aabbs]
+        for idx, placed in enumerate(self._placed_aabbs):
+            dims = (placed.x1 - placed.x0, placed.y1 - placed.y0, placed.z1 - placed.z0)
+            support = self._support_geometry(placed.x0, placed.y0, placed.z0, dims)
+            if not support.supporters or support.support_area <= 0.0:
+                continue
+            for supporter_idx, area in support.supporters:
+                if supporter_idx >= idx:
+                    continue
+                loads[supporter_idx] += placed.mass * (area / support.support_area)
+        return loads
+
+    def _assert_incremental_loads_match_recompute(self) -> None:
+        recomputed = self._recompute_loads()
+        for idx, expected in enumerate(recomputed):
+            actual = self._placed_aabbs[idx].load_on_top
+            assert abs(actual - expected) <= 1e-6, (
+                f"load mismatch idx={idx} incremental={actual:.6f} "
+                f"recomputed={expected:.6f}"
+            )
 
     def _place_candidate(self, candidate: Candidate) -> None:
         """최고 후보를 실제 배치하고 연속 실패 카운터를 초기화한다."""
@@ -704,6 +1273,13 @@ class Palletizer:
             f"max_top_height={max_top:.3f} "
             f"support_threshold={support_threshold:.2f}"
         )
+        if self.policy_inference.enabled:
+            print(
+                "[POLICY] "
+                f"attempts={self._policy_attempts} "
+                f"successes={self._policy_successes} "
+                f"fallbacks={self._policy_fallbacks}"
+            )
 
     def run(self, boxes: List[BoxInput]) -> RunResult:
         """전체 박스 시퀀스에 대해 팔레타이징을 수행한다.
@@ -732,7 +1308,7 @@ class Palletizer:
                 break
 
             indexed = list(enumerate(current))
-            best = self._best_candidate(indexed)
+            best = self._select_candidate(indexed)
 
             if best is not None:
                 self._place_candidate(best)
@@ -748,18 +1324,15 @@ class Palletizer:
 
             self._consecutive_failures += 1
 
-            # 버퍼가 있으면 현재 창을 전부 검사했으므로 가장 앞 박스 하나를
-            # 소비해 다음 입력을 노출한다. buffer_size=0도 같은 방식으로 skip한다.
-            if self.algo.buffer_size == 0:
-                buf.pop_next()
-            else:
-                buf.pop_selected(0)
-
-            if self.should_finish(current):
-                self.finished = True
-                if current:
-                    self.terminated_step = int(current[0]["step"])
+            if self.stop_policy.stop_when_no_safe_candidate:
+                self.finished_by_user = True
+                self.terminated_step = None
                 break
+
+            self.finished = True
+            if current:
+                self.terminated_step = int(current[0]["step"])
+            break
 
         self._assert_valid_result()
 

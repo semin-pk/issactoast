@@ -33,8 +33,10 @@ project/
 | visualize.py                 | 적재 결과 시각화           
 | requirements.txt             | Python 패키지 목록       
 | config/algorithm_config.yaml | 알고리즘 설정             
+| src/box_generator.py         | 튜닝/holdout용 자가 박스 시퀀스 생성기
 | ALGORITHM_CHANGELOG.md       | 알고리즘 변경 이력 및 현재 구현 설명
 | EVALUATION_GUIDE.md          | evaluate.py / physics_check.py 실행 가이드
+| PROJECT_USAGE.md             | 데이터 생성부터 MCTS teacher/ONNX policy까지 전체 사용법
 | box_sequence/                | 입력 박스 시퀀스           
 | algorithm_results/           | 결과 저장 디렉토리          
 
@@ -238,6 +240,13 @@ position     = [0.15, 0.10, 0.05]
 (팔레트 길이 × 폭 × 높이)
 ```
 
+버퍼 보너스는 원본 시뮬레이터의 `buffer_size` 해석에 맞춰, 실행 중
+평균 점유 개수가 아니라 설정된 버퍼 capacity 기준으로 계산합니다.
+
+```text
+buffer_bonus = max(0, 20 - buffer_size)
+```
+
 현재 기본 팔레트 크기:
 
 ```yaml
@@ -261,6 +270,62 @@ buffer:
 * 현재 박스 포함 최대 4개 박스를 동시에 확인 가능
 * 참가자는 이 중 어떤 박스를 먼저 적재할지 선택 가능
 * 박스 적재 시 자동으로 보충됨
+
+---
+
+# 자가 데이터 생성
+
+튜닝/검증용 입력은 `src/box_generator.py`로 생성할 수 있습니다.
+
+```bash
+python src/box_generator.py --seed 1000 --count 120 --mode uniform --output box_sequence/generated.json
+python src/box_generator.py --count 120 --mode sku --seed-set both --output generated_sequences
+```
+
+`uniform`과 `sku`는 숨은 평가 분포의 정답 모델이 아닙니다. 한 분포에만
+맞춘 값은 실제 평가에서 깨질 수 있으므로, tuning/holdout을 두 모드 모두
+만들어 교차 측정하는 용도로 사용합니다.
+
+---
+
+# 정책 신경망 학습 파이프라인
+
+정책 신경망 학습은 제출 코드가 아니라 `dev_tools/`의 오프라인 도구로
+수행합니다. 최종 제출 경로에서는 `src/policy_inference.py`가
+`onnxruntime`만 사용합니다.
+
+데이터 수집:
+
+```bash
+python dev_tools/collect_policy_data.py \
+  --config config/algorithm_config.yaml \
+  --input generated_sequences/tuning \
+  --output data/policy_dataset/train_sku.npz \
+  --teacher beam
+```
+
+증강:
+
+```bash
+python dev_tools/augment_policy_data.py \
+  --input data/policy_dataset/train_sku.npz \
+  --output data/policy_dataset/train_sku_aug.npz
+```
+
+학습 및 ONNX export:
+
+```bash
+python dev_tools/train_policy.py \
+  --config config/policy_train_config.yaml \
+  --train data/policy_dataset/train_sku_aug.npz \
+  --valid data/policy_dataset/valid_sku_aug.npz \
+  --output models/policy_net.onnx
+```
+
+정책을 채택하려면 `config/algorithm_config.yaml`의 `policy_inference.enabled`
+를 `true`로 바꾼 뒤 holdout에서 평균점수, 최악점수, fail율, 실행시간,
+fallback 횟수를 기존 휴리스틱과 비교합니다. 조건을 만족하지 못하면
+`enabled: false`로 두고 휴리스틱을 사용합니다.
 
 ---
 

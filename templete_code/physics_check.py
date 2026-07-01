@@ -414,6 +414,9 @@ def run(
     solver_iterations: int = DEFAULT_SOLVER_ITERATIONS,
     show_buffer: bool = False,
     gui_step_delay: float = DEFAULT_GUI_STEP_DELAY,
+    strict: bool = False,
+    strict_friction_scale: float = 0.6,
+    strict_drift_threshold_m: float = 0.01,
 ) -> PhysicsResult:
     """Run PyBullet simulation for one result JSON file."""
 
@@ -424,11 +427,24 @@ def run(
     cfg = read_simple_yaml(sim_config_path)
 
     pallet_size = [float(v) for v in cfg["pallet"]["size"]]
-    settling = cfg["settling"]
-    evaluation = cfg["evaluation"]
-    box_cfg = cfg["physics"]["box"]
-    pallet_cfg = cfg["physics"]["pallet"]
-    ground_cfg = cfg["physics"]["ground"]
+    settling = dict(cfg["settling"])
+    evaluation = dict(cfg["evaluation"])
+    box_cfg = dict(cfg["physics"]["box"])
+    pallet_cfg = dict(cfg["physics"]["pallet"])
+    ground_cfg = dict(cfg["physics"]["ground"])
+
+    if strict:
+        solver_iterations = max(int(solver_iterations), 160)
+        evaluation["drift_threshold_m"] = min(
+            float(evaluation["drift_threshold_m"]),
+            float(strict_drift_threshold_m),
+        )
+        settling["final_steps"] = int(float(settling["final_steps"]) * 2.0)
+        settling["max_steps"] = int(float(settling["max_steps"]) * 1.5)
+        for dynamics_cfg in (box_cfg, pallet_cfg, ground_cfg):
+            dynamics_cfg["static_friction"] = (
+                float(dynamics_cfg["static_friction"]) * float(strict_friction_scale)
+            )
 
     client_id = p.connect(p.GUI if gui else p.DIRECT)
     body_ids: List[int] = []
@@ -663,6 +679,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--time-step", type=float, default=DEFAULT_TIME_STEP)
     parser.add_argument("--solver-iterations", type=int, default=DEFAULT_SOLVER_ITERATIONS)
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Use conservative local settings: lower friction, more settling, tighter drift",
+    )
+    parser.add_argument("--strict-friction-scale", type=float, default=0.6)
+    parser.add_argument("--strict-drift-threshold-m", type=float, default=0.01)
     return parser
 
 
@@ -686,7 +709,7 @@ def main() -> int:
     print("NOTE: PyBullet is an Isaac Sim / PhysX approximation for local risk screening.")
     print(
         f"time_step={args.time_step} solver_iterations={args.solver_iterations} "
-        f"gui={args.gui} show_buffer={args.show_buffer}"
+        f"gui={args.gui} show_buffer={args.show_buffer} strict={args.strict}"
     )
 
     for path in files:
@@ -698,6 +721,9 @@ def main() -> int:
             solver_iterations=args.solver_iterations,
             show_buffer=args.show_buffer,
             gui_step_delay=args.gui_step_delay,
+            strict=args.strict,
+            strict_friction_scale=args.strict_friction_scale,
+            strict_drift_threshold_m=args.strict_drift_threshold_m,
         )
         status = "PASS" if result.pallet_pass else "FAIL"
         reason_text = " | ".join(result.reasons[:3]) if result.reasons else "-"

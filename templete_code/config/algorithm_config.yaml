@@ -1,4 +1,4 @@
-input_path: box_sequence
+input_path: generated_sequences/holdout
 output_dir: algorithm_results
 
 pallet:
@@ -27,9 +27,46 @@ heuristic:
     w_flat: 0.4
     w_mass: 0.15
 
+physics_mask:
+  enabled: true
+  com_margin_m: 0.005
+  corner_tolerance_m: 0.03
+  min_supported_corners: 2
+  min_supported_edges: 1
+  lower_load_limit_ratio: 4.0
+  top_load_limit_ratio: 3.0
+  load_safety_margin: 0.85
+  debug_recompute_loads: false
+
+stop_policy:
+  stop_when_no_safe_candidate: true
+
+policy_data:
+  min_utilization_threshold: 0.45
+  baseline_margin: 0.0
+  save_failed_episodes: false
+
+policy_inference:
+  enabled: false
+  model_path: models/policy_net.onnx
+  top_k: 32
+  fallback_to_heuristic: true
+  stop_if_no_safe_action: true
+
+mcts:
+  enabled: true
+  num_simulations: 128
+  max_depth: 30
+  c_puct: 1.5
+  prior: uniform
+  rollout_policy: heuristic
+  rollout_max_steps: 100
+  use_baseline_delta: true
+  baseline_policy: heuristic
+  max_actions_per_node: 64
+  time_budget_sec_per_decision: 2.0
+  fallback_on_timeout: heuristic
+
 ############# 아래는 사용자가 입력하는 설정값입니다. #############
 buffer:
-  size: 8                       # 버퍼 슬롯 수, 동시에 대기 가능한 박스 수
-
-
-
+  size: 4                       # 버퍼 슬롯 수, 동시에 대기 가능한 박스 수

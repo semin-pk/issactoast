@@ -1,0 +1,13 @@
+model:
+  hidden_channels: 32
+  buffer_hidden: 64
+
+training:
+  epochs: 10
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  early_stopping_patience: 3
+
+export:
+  opset_version: 17

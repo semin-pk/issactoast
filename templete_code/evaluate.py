@@ -23,6 +23,7 @@ import csv
 import json
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -66,8 +67,39 @@ class FileScore:
     max_final_top_z: Optional[float] = None
 
 
+BUFFER_MAX = 20
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def buffer_bonus_from_capacity(buffer_size: int) -> float:
+    """Return the official buffer bonus for configured capacity.
+
+    Source cross-check:
+    - templete_code/README.md describes buffer.size as the number of boxes that
+      can be viewed at once.
+    - palletizing_simulator/evaluator.py computes max(0, 20 - buffer_size).
+    - palletizing_simulator/buffer_manager.py stores plan_data["buffer_size"] as
+      the configured window size, not an average occupied count.
+    """
+
+    return float(max(0, BUFFER_MAX - int(buffer_size)))
+
+
+def verify_score_contract() -> None:
+    """Regression guard for the buffer bonus interpretation."""
+
+    for buffer_size in range(0, BUFFER_MAX + 6):
+        local_bonus = buffer_bonus_from_capacity(buffer_size)
+        simulator_formula = float(max(0, BUFFER_MAX - buffer_size))
+        if abs(local_bonus - simulator_formula) > 1e-12:
+            raise AssertionError(
+                "buffer bonus mismatch: "
+                f"buffer_size={buffer_size} local={local_bonus} "
+                f"simulator={simulator_formula}"
+            )
 
 
 def require_key(data: Dict[str, Any], key: str, source: Path) -> Any:
@@ -401,7 +433,7 @@ def evaluate_result_file(
     util_points = min(utilization_pct, 100.0)
 
     buffer_size = int(result["buffer_size"])
-    buffer_bonus = clamp(20.0 - float(buffer_size), 0.0, 20.0)
+    buffer_bonus = buffer_bonus_from_capacity(buffer_size)
 
     hard_reasons: List[str] = []
     hard_reasons.extend(
@@ -433,6 +465,9 @@ def evaluate_result_file(
             solver_iterations=int(physics_options["solver_iterations"]),
             show_buffer=bool(physics_options["show_buffer"]),
             gui_step_delay=float(physics_options["gui_step_delay"]),
+            strict=bool(physics_options["strict"]),
+            strict_friction_scale=float(physics_options["strict_friction_scale"]),
+            strict_drift_threshold_m=float(physics_options["strict_drift_threshold_m"]),
         )
         physics_pass = bool(physics_result.pallet_pass)
         max_final_drift = float(physics_result.max_final_drift)
@@ -508,14 +543,16 @@ def warn_if_results_stale(result_files: Sequence[Path], config_buffer_size: int)
     print("[WARN] Run evaluate.py with --refresh-results to execute main.py first.")
 
 
-def refresh_results_with_main() -> None:
+def refresh_results_with_main() -> float:
     here = Path(__file__).resolve().parent
     main_path = here / "main.py"
     if not main_path.exists():
         raise FileNotFoundError(f"main.py not found next to evaluate.py: {main_path}")
 
     print("[INFO] --refresh-results enabled: running main.py before evaluation", flush=True)
+    start = time.perf_counter()
     subprocess.run([sys.executable, str(main_path)], cwd=here, check=True)
+    return time.perf_counter() - start
 
 
 def format_reasons(score: FileScore) -> str:
@@ -596,15 +633,23 @@ def summarize_scores(scores: Sequence[FileScore]) -> Dict[str, float]:
         return {
             "n_files": 0,
             "mean_final_score": 0.0,
+            "mean_score": 0.0,
+            "worst_score": 0.0,
+            "fail_rate": 0.0,
             "pass_rate": 0.0,
             "mean_utilization_pct": 0.0,
             "mean_buffer_bonus": 0.0,
         }
 
+    final_scores = [score.final_score for score in scores]
+    pass_values = [not score.hard_fail for score in scores]
     return {
         "n_files": float(len(scores)),
-        "mean_final_score": float(np.mean([score.final_score for score in scores])),
-        "pass_rate": float(np.mean([not score.hard_fail for score in scores])),
+        "mean_final_score": float(np.mean(final_scores)),
+        "mean_score": float(np.mean(final_scores)),
+        "worst_score": float(np.min(final_scores)),
+        "fail_rate": float(1.0 - np.mean(pass_values)),
+        "pass_rate": float(np.mean(pass_values)),
         "mean_utilization_pct": float(np.mean([score.utilization_pct for score in scores])),
         "mean_buffer_bonus": float(np.mean([score.buffer_bonus for score in scores])),
     }
@@ -613,16 +658,21 @@ def summarize_scores(scores: Sequence[FileScore]) -> Dict[str, float]:
 def append_benchmark_log(
     log_path: Path,
     label: str,
+    seed_set: str,
     scores: Sequence[FileScore],
+    mean_runtime_sec: Optional[float] = None,
 ) -> None:
     summary = summarize_scores(scores)
     fieldnames = [
         "timestamp",
         "label",
+        "seed_set",
         "physics_mode",
         "n_files",
-        "mean_final_score",
-        "pass_rate",
+        "mean_score",
+        "worst_score",
+        "fail_rate",
+        "mean_runtime_sec",
         "mean_utilization_pct",
         "mean_buffer_bonus",
     ]
@@ -636,17 +686,22 @@ def append_benchmark_log(
         writer.writerow({
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "label": label,
+            "seed_set": seed_set,
             "physics_mode": scores[0].physics_mode if scores else "geom",
             "n_files": int(summary["n_files"]),
-            "mean_final_score": f"{summary['mean_final_score']:.6f}",
-            "pass_rate": f"{summary['pass_rate']:.6f}",
+            "mean_score": f"{summary['mean_score']:.6f}",
+            "worst_score": f"{summary['worst_score']:.6f}",
+            "fail_rate": f"{summary['fail_rate']:.6f}",
+            "mean_runtime_sec": (
+                "" if mean_runtime_sec is None else f"{mean_runtime_sec:.6f}"
+            ),
             "mean_utilization_pct": f"{summary['mean_utilization_pct']:.6f}",
             "mean_buffer_bonus": f"{summary['mean_buffer_bonus']:.6f}",
         })
 
 
 def ensure_benchmark_log_schema(log_path: Path, fieldnames: Sequence[str]) -> None:
-    """Migrate older benchmark logs that did not have physics_mode."""
+    """Migrate older benchmark logs to the v2 schema."""
 
     if not log_path.exists():
         return
@@ -660,8 +715,18 @@ def ensure_benchmark_log_schema(log_path: Path, fieldnames: Sequence[str]) -> No
     migrated_rows: List[Dict[str, Any]] = []
     for row in rows:
         migrated = {field: row.get(field, "") for field in fieldnames}
+        if not migrated.get("mean_score"):
+            migrated["mean_score"] = row.get("mean_final_score", "")
+        if not migrated.get("fail_rate"):
+            pass_rate = row.get("pass_rate", "")
+            try:
+                migrated["fail_rate"] = f"{1.0 - float(pass_rate):.6f}"
+            except ValueError:
+                migrated["fail_rate"] = ""
         if not migrated.get("physics_mode"):
             migrated["physics_mode"] = "geom"
+        if not migrated.get("seed_set"):
+            migrated["seed_set"] = "legacy"
         migrated_rows.append(migrated)
 
     with log_path.open("w", encoding="utf-8", newline="") as f:
@@ -689,6 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--results", default="algorithm_results", help="Result JSON file or directory")
     parser.add_argument("--label", default="unlabeled", help="Version label appended to benchmark_log.csv")
+    parser.add_argument("--seed-set", default="manual", help="Seed set name appended to benchmark_log.csv")
     parser.add_argument("--config", default="config/algorithm_config.yaml", help="Algorithm config path")
     parser.add_argument(
         "--sim-config",
@@ -724,6 +790,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--time-step", type=float, default=1.0 / 60.0)
     parser.add_argument("--solver-iterations", type=int, default=80)
+    parser.add_argument("--physics-strict", action="store_true")
+    parser.add_argument("--strict-friction-scale", type=float, default=0.6)
+    parser.add_argument("--strict-drift-threshold-m", type=float, default=0.01)
     parser.add_argument("--benchmark-log", default="benchmark_log.csv")
     parser.add_argument("--report-json", default="eval_report.json")
     parser.add_argument("--no-report-json", action="store_true")
@@ -739,9 +808,11 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    verify_score_contract()
+    refresh_runtime_sec: Optional[float] = None
     if args.refresh_results:
         try:
-            refresh_results_with_main()
+            refresh_runtime_sec = refresh_results_with_main()
         except subprocess.CalledProcessError as exc:
             parser.exit(status=exc.returncode, message=f"[ERROR] main.py failed with exit code {exc.returncode}\n")
 
@@ -779,6 +850,9 @@ def main() -> int:
             "solver_iterations": int(args.solver_iterations),
             "show_buffer": bool(args.physics_show_buffer),
             "gui_step_delay": float(args.gui_step_delay),
+            "strict": bool(args.physics_strict),
+            "strict_friction_scale": float(args.strict_friction_scale),
+            "strict_drift_threshold_m": float(args.strict_drift_threshold_m),
         }
 
     try:
@@ -790,7 +864,10 @@ def main() -> int:
         parser.exit(status=1, message=f"[ERROR] {exc}\n")
 
     print_report(scores, thresholds)
-    append_benchmark_log(Path(args.benchmark_log), args.label, scores)
+    mean_runtime_sec = (
+        None if refresh_runtime_sec is None or not scores else refresh_runtime_sec / len(scores)
+    )
+    append_benchmark_log(Path(args.benchmark_log), args.label, args.seed_set, scores, mean_runtime_sec)
 
     if not args.no_report_json:
         write_eval_report(Path(args.report_json), args.label, scores)
