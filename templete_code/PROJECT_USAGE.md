@@ -150,6 +150,11 @@ soft-label 학습 확장용입니다.
 
 ## 5. 데이터 증강
 
+과제에서 실제 박스 배치 회전은 `0도`와 `90도`만 허용됩니다.
+아래 증강의 `rot180`은 **학습 데이터 좌표계를 뒤집는 대칭 변환**이지,
+출력 JSON의 박스 rotation 값에 `180도`를 추가한다는 뜻이 아닙니다.
+출력 rotation은 계속 `{0, 90}`만 사용합니다.
+
 지원 증강은 직사각형 팔레트에 안전한 세 가지입니다.
 
 ```text
@@ -306,4 +311,70 @@ MCTS smoke dataset:
   --max-sequences 1 \
   --min-utilization-threshold 0.0 \
   --label smoke_mcts
+```
+
+## 10. Command 창에서 전체 흐름 실행
+
+macOS/Linux 터미널 기준으로는 위 예시처럼 `\` 줄바꿈을 써도 됩니다.
+Command Prompt나 복사 실행이 불편한 환경에서는 아래처럼 한 줄 명령으로
+실행합니다.
+
+작업 폴더 이동:
+
+```bash
+cd /Users/parksemin/Documents/Cursor/issactoast/templete_code
+```
+
+데이터 생성:
+
+```bash
+.venv/bin/python src/box_generator.py --count 120 --mode sku --seed-set both --output generated_sequences
+```
+
+휴리스틱 baseline 평가:
+
+```bash
+.venv/bin/python evaluate.py --refresh-results --results algorithm_results --label heuristic_holdout --seed-set holdout_sku --bounds-tol 0.001 --epsilon 0.0011
+```
+
+MCTS train dataset 생성:
+
+```bash
+.venv/bin/python dev_tools/collect_mcts_policy_data.py --config config/algorithm_config.yaml --input generated_sequences/tuning --output data/mcts_dataset/train_sku_mcts.npz --num-simulations 128 --max-depth 30 --max-sequences 50 --label mcts_teacher_v1
+```
+
+MCTS validation dataset 생성:
+
+```bash
+.venv/bin/python dev_tools/collect_mcts_policy_data.py --config config/algorithm_config.yaml --input generated_sequences/holdout --output data/mcts_dataset/valid_sku_mcts.npz --num-simulations 128 --max-depth 30 --max-sequences 20 --label mcts_valid_sku
+```
+
+train dataset 증강:
+
+```bash
+.venv/bin/python dev_tools/augment_policy_data.py --input data/mcts_dataset/train_sku_mcts.npz --output data/mcts_dataset/train_sku_mcts_aug.npz
+```
+
+validation dataset 증강:
+
+```bash
+.venv/bin/python dev_tools/augment_policy_data.py --input data/mcts_dataset/valid_sku_mcts.npz --output data/mcts_dataset/valid_sku_mcts_aug.npz
+```
+
+정책망 학습 및 ONNX export:
+
+```bash
+.venv/bin/python dev_tools/train_policy.py --config config/policy_train_config.yaml --train data/mcts_dataset/train_sku_mcts_aug.npz --valid data/mcts_dataset/valid_sku_mcts_aug.npz --output models/policy_net.onnx
+```
+
+ONNX policy 평가:
+
+```bash
+.venv/bin/python evaluate.py --refresh-results --results algorithm_results --label onnx_policy_holdout --seed-set holdout_sku --bounds-tol 0.001 --epsilon 0.0011
+```
+
+Windows Command Prompt에서 실행한다면 Python 경로 구분자만 아래처럼 바꿉니다.
+
+```bat
+.venv\Scripts\python dev_tools\train_policy.py --config config\policy_train_config.yaml --train data\mcts_dataset\train_sku_mcts_aug.npz --valid data\mcts_dataset\valid_sku_mcts_aug.npz --output models\policy_net.onnx
 ```
