@@ -117,6 +117,19 @@ teacher로만 사용합니다.
   --label mcts_teacher_v1
 ```
 
+validation용 수집은 tuning과 seed가 겹치지 않는 holdout에서 만듭니다.
+
+```bash
+.venv/bin/python dev_tools/collect_mcts_policy_data.py \
+  --config config/algorithm_config.yaml \
+  --input generated_sequences/holdout \
+  --output data/mcts_dataset/valid_sku_mcts.npz \
+  --num-simulations 128 \
+  --max-depth 30 \
+  --max-sequences 20 \
+  --label mcts_valid_sku
+```
+
 저장되는 주요 필드:
 
 ```text
@@ -153,6 +166,14 @@ rot180
   --output data/mcts_dataset/train_sku_mcts_aug.npz
 ```
 
+validation dataset도 같은 방식으로 증강합니다.
+
+```bash
+.venv/bin/python dev_tools/augment_policy_data.py \
+  --input data/mcts_dataset/valid_sku_mcts.npz \
+  --output data/mcts_dataset/valid_sku_mcts_aug.npz
+```
+
 증강 시 `action`, `action_mask`, `mcts_policy`, `visit_counts`, `q_values`를
 같이 좌표 보정합니다. 보정 후 `action_mask[action] == 1`을 assert합니다.
 
@@ -167,6 +188,20 @@ rot180
   --valid data/mcts_dataset/valid_sku_mcts_aug.npz \
   --output models/policy_net.onnx
 ```
+
+데이터 흐름은 다음처럼 분리합니다.
+
+```text
+generated_sequences/tuning
+→ train_sku_mcts.npz
+→ train_sku_mcts_aug.npz
+
+generated_sequences/holdout
+→ valid_sku_mcts.npz
+→ valid_sku_mcts_aug.npz
+```
+
+validation은 모델 선택과 early stopping에만 쓰고, tuning seed와 섞지 않습니다.
 
 현재 학습 코드는 hard label cross entropy를 사용합니다.
 
