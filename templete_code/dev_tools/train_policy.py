@@ -67,6 +67,14 @@ def require_torch():
     return torch, nn, F, DataLoader, TensorDataset
 
 
+def print_device_info(torch, device) -> None:
+    cuda_available = bool(torch.cuda.is_available())
+    print(f"device={device} cuda_available={cuda_available} torch_cuda={torch.version.cuda}")
+    if cuda_available:
+        index = int(torch.cuda.current_device())
+        print(f"gpu={index} name={torch.cuda.get_device_name(index)}")
+
+
 def build_model(torch, nn, hidden_channels: int, buffer_hidden: int):
     class PolicyNet(nn.Module):
         def __init__(self) -> None:
@@ -148,6 +156,7 @@ def main() -> int:
     cfg = load_config(Path(args.config))
     torch, nn, _F, DataLoader, TensorDataset = require_torch()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print_device_info(torch, device)
 
     train_np = load_npz_many(expand_paths(args.train))
     valid_np = load_npz_many(expand_paths(args.valid))

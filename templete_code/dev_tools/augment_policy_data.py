@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -23,9 +23,18 @@ def transform_sample(
     transform: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     b_idx, r_idx, x_idx, y_idx = [int(value) for value in action]
-    box_w, box_h = [int(value) for value in footprint]
     h_grid = int(height_map.shape[-2])
     w_grid = int(height_map.shape[-1])
+    box_w, box_h = effective_footprint(
+        footprint_all,
+        b_idx,
+        r_idx,
+        x_idx,
+        y_idx,
+        w_grid,
+        h_grid,
+        fallback=footprint,
+    )
 
     new_height = height_map.copy()
     new_mask = remap_action_mask(action_mask, footprint_all, transform)
@@ -52,6 +61,29 @@ def transform_sample(
         np.ascontiguousarray(new_mask),
         new_action,
     )
+
+
+def effective_footprint(
+    footprint_all: np.ndarray,
+    b_idx: int,
+    r_idx: int,
+    x_idx: int,
+    y_idx: int,
+    w_grid: int,
+    h_grid: int,
+    *,
+    fallback: Optional[np.ndarray] = None,
+) -> Tuple[int, int]:
+    if 0 <= b_idx < footprint_all.shape[0] and 0 <= r_idx < footprint_all.shape[1]:
+        box_w, box_h = [int(value) for value in footprint_all[b_idx, r_idx]]
+    elif fallback is not None:
+        box_w, box_h = [int(value) for value in fallback]
+    else:
+        box_w, box_h = 0, 0
+
+    box_w = min(max(box_w, 1), max(w_grid - int(x_idx), 1))
+    box_h = min(max(box_h, 1), max(h_grid - int(y_idx), 1))
+    return box_w, box_h
 
 
 def remap_action_mask(
@@ -82,12 +114,21 @@ def remap_action_tensor(
             else:
                 ys, xs = np.where(action_tensor[b_idx, r_idx] != 0.0)
             for y_idx, x_idx in zip(ys, xs):
+                box_w_eff, box_h_eff = effective_footprint(
+                    footprint_all,
+                    b_idx,
+                    r_idx,
+                    int(x_idx),
+                    int(y_idx),
+                    w_grid,
+                    h_grid,
+                )
                 new_x = int(x_idx)
                 new_y = int(y_idx)
                 if transform in {"flip_x", "rot180"}:
-                    new_x = w_grid - int(x_idx) - box_w
+                    new_x = w_grid - int(x_idx) - box_w_eff
                 if transform in {"flip_y", "rot180"}:
-                    new_y = h_grid - int(y_idx) - box_h
+                    new_y = h_grid - int(y_idx) - box_h_eff
                 if 0 <= new_x < w_grid and 0 <= new_y < h_grid:
                     remapped[b_idx, r_idx, new_y, new_x] = (
                         1.0 if binary else action_tensor[b_idx, r_idx, y_idx, x_idx]

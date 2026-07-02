@@ -346,19 +346,19 @@ MCTS train dataset 생성:
 MCTS validation dataset 생성:
 
 ```bash
-.venv/bin/python dev_tools/collect_mcts_policy_data.py --config config/algorithm_config.yaml --input generated_sequences/holdout --output data/mcts_dataset/valid_sku_mcts.npz --num-simulations 128 --max-depth 30 --max-sequences 20 --label mcts_valid_sku
+python dev_tools/collect_mcts_policy_data.py --config config/algorithm_config.yaml --input generated_sequences/holdout --output data/mcts_dataset/valid_sku_mcts.npz --num-simulations 128 --max-depth 30 --max-sequences 20 --label mcts_valid_sku
 ```
 
 train dataset 증강:
 
 ```bash
-.venv/bin/python dev_tools/augment_policy_data.py --input data/mcts_dataset/train_sku_mcts.npz --output data/mcts_dataset/train_sku_mcts_aug.npz
+python dev_tools/augment_policy_data.py --input data/mcts_dataset/train_sku_mcts.npz --output data/mcts_dataset/train_sku_mcts_aug.npz
 ```
 
 validation dataset 증강:
 
 ```bash
-.venv/bin/python dev_tools/augment_policy_data.py --input data/mcts_dataset/valid_sku_mcts.npz --output data/mcts_dataset/valid_sku_mcts_aug.npz
+python dev_tools/augment_policy_data.py --input data/mcts_dataset/valid_sku_mcts.npz --output data/mcts_dataset/valid_sku_mcts_aug.npz
 ```
 
 정책망 학습 및 ONNX export:
