@@ -1,0 +1,8 @@
+numpy==2.4.3
+onnx==1.21.0
+onnxruntime==1.25.0
+protobuf==7.34.1
+flatbuffers==25.12.19
+typing_extensions==4.15.0
+PyYAML==6.0.3
+ml_dtypes==0.5.4

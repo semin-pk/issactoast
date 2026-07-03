@@ -1,4 +1,4 @@
-input_path: generated_sequences/holdout
+input_path: box_sequence
 output_dir: algorithm_results
 
 pallet:
@@ -9,6 +9,9 @@ pallet:
 json:
   indent: 2
   ensure_ascii: false
+
+visualize:
+  enabled: false
 
 algorithm:
   allow_rotation: true            # 박스 Z축 기준 90도 회전 허용 여부
@@ -48,13 +51,13 @@ policy_data:
 
 policy_inference:
   enabled: true
-  model_path: models/policy_net.onnx
+  model_path: src/policy_net.onnx
   top_k: 32
   fallback_to_heuristic: true
   stop_if_no_safe_action: true
 
 mcts:
-  enabled: true
+  enabled: false
   num_simulations: 128
   max_depth: 30
   c_puct: 1.5
