@@ -19,7 +19,7 @@ heuristic:
   support_threshold: 0.8
   support_z_tol_m: 0.003
   max_consecutive_failures: 40
-  min_remaining_height_m: 0.03
+  min_remaining_height_m: 0.015
   weights:
     w_height: 1.0
     w_support: 2.0
@@ -35,7 +35,7 @@ physics_mask:
   min_supported_edges: 1
   lower_load_limit_ratio: 4.0
   top_load_limit_ratio: 3.0
-  load_safety_margin: 0.85
+  load_safety_margin: 0.90
   debug_recompute_loads: false
 
 stop_policy:

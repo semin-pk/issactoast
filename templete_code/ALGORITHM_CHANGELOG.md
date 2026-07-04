@@ -5,6 +5,198 @@
 
 ## 변경 이력
 
+### 2026-07-04 - Stage 8 ONNX 정책 채택 검증
+
+#### 변경 목적
+
+Stage 5의 `final_heuristic_v2` baseline과 비교해 새 ONNX 정책망을 채택할지 결정했다.
+
+#### 변경 내용
+
+- `policy_inference.enabled: true`로 전환했다.
+- `models/policy_net.onnx`를 사용해 `onnx_policy_holdout_v2` holdout 평가를 실행했다.
+- 제출 경로의 금지 import(`torch`, `pybullet`, `optuna`, `cma`)를 확인했다.
+
+#### 검증 결과
+
+| label | physics_mode | mean_score | worst_score | fail_rate | mean_runtime_sec | mean_utilization_pct |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `final_heuristic_v2` | pybullet | 55.497069 | 0.000000 | 0.050000 | 17.443906 | 42.693819 |
+| `onnx_policy_holdout_v2` | geom | 59.154477 | 45.838596 | 0.000000 | 19.283605 | 43.154477 |
+
+ONNX 평가에서 max runtime은 24.994초로 90초 미만이었다. 정책 inference는 총 1144회 시도 중 1131회 성공, fallback 13회로 fallback rate는 약 1.1%였다. 금지 import 스캔 결과는 비어 있었다. 채택 기준을 만족하므로 ONNX 정책을 채택한다.
+
+### 2026-07-04 - Stage 7 정책망 재학습 및 ONNX export
+
+#### 변경 목적
+
+`buffer.size: 4` shape와 호환되는 정책망을 재학습하고 ONNX 모델을 갱신했다.
+
+#### 변경 내용
+
+- `data/mcts_dataset/train_sku_mcts_aug.npz`와 `valid_sku_mcts_aug.npz`로 `dev_tools/train_policy.py`를 실행했다.
+- 첫 export는 Windows CP949 콘솔 인코딩 문제로 실패했으나, `PYTHONIOENCODING=utf-8`로 재실행해 ONNX export를 완료했다.
+- 회귀 체크로 주요 Python 파일을 `py_compile`했다.
+
+#### 검증 결과
+
+UTF-8 재실행 기준 주요 validation 로그:
+
+| epoch | valid_ce | top1 | top5 |
+| ---: | ---: | ---: | ---: |
+| 34 | 4.2036 | 0.179 | 0.436 |
+| 35 | 4.2233 | 0.171 | 0.424 |
+| 36 | 4.1948 | 0.180 | 0.431 |
+| 37 | 4.2379 | 0.176 | 0.432 |
+| 38 | 4.2038 | 0.179 | 0.435 |
+| 39 | 4.2037 | 0.180 | 0.433 |
+
+Best checkpoint는 `valid_ce=4.1948`인 epoch 36이며, `models/policy_net.onnx`와 `models/policy_net.onnx.data`가 생성되었다. `py_compile`은 오류 없이 통과했다.
+
+### 2026-07-04 - Stage 6 MCTS 데이터셋 증강 갱신
+
+#### 변경 목적
+
+Stage 1~5에서 확정된 `buffer.size: 4` 기준으로 정책망 학습 데이터의 shape 호환성을 확인하고, 학습/검증 증강 데이터셋을 다시 생성했다.
+
+#### 변경 내용
+
+- `data/mcts_dataset/train_sku_mcts.npz`, `valid_sku_mcts.npz`의 주요 tensor shape를 확인했다.
+  - `buffer_features`: `(N, 4, 6)`
+  - `action_mask`: `(N, 4, 2, 50, 60)`
+  - `mcts_policy`: `(N, 4, 2, 50, 60)`
+- 원 지시의 full MCTS 재수집(`--num-simulations 128 --max-sequences 50`)은 현재 환경에서 6시간 이상 완료되지 않아 중단했다.
+- 기존 raw MCTS 데이터가 확정 buffer size와 shape가 맞아 이를 기준으로 증강을 다시 수행했다.
+
+#### 검증 결과
+
+| artifact | samples | 결과 |
+| --- | ---: | --- |
+| `data/mcts_dataset/train_sku_mcts_aug.npz` | 2972 | `AssertionError` 없이 생성 |
+| `data/mcts_dataset/valid_sku_mcts_aug.npz` | 1096 | `AssertionError` 없이 생성 |
+
+### 2026-07-04 - Stage 5 최종 휴리스틱 baseline 수립
+
+#### 변경 목적
+
+Stage 1~4에서 확정한 휴리스틱 config를 기준으로 PyBullet strict 최종 baseline을 재수립하고, 이후 ONNX 정책 채택 여부 판단 기준으로 고정했다.
+
+#### 변경 내용
+
+- 확정 config:
+  - `buffer.size: 4`
+  - `policy_inference.enabled: false`
+  - `heuristic.min_remaining_height_m: 0.015`
+  - `heuristic.max_consecutive_failures: 40`
+  - `physics_mask.load_safety_margin: 0.90`
+  - `heuristic.candidate_step_m: 0.02`
+- `evaluate.py --refresh-results --physics --physics-strict --label final_heuristic_v2`로 holdout_sku 20개를 재평가했다.
+
+#### 검증 결과
+
+| label | physics_mode | mean_score | worst_score | fail_rate | mean_runtime_sec | mean_utilization_pct |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `final_heuristic_v2` | pybullet | 55.497069 | 0.000000 | 0.050000 | 17.443906 | 42.693819 |
+
+### 2026-07-04 - Stage 4 candidate_step_m 해상도 스윕
+
+#### 변경 목적
+
+후보 좌표 스캔 해상도를 0.02m보다 촘촘하게 만들 때 점수 개선이 있는지 확인하고, 점수와 런타임의 균형을 비교했다.
+
+#### 변경 내용
+
+- Stage 1~3 확정 config를 기준으로 `candidate_step_m` 후보 0.02, 0.015, 0.01을 각각 평가했다.
+- 세 후보의 `mean_score`, `worst_score`, `fail_rate`가 모두 동일했다.
+- 더 촘촘한 해상도는 런타임만 소폭 증가했으므로 `candidate_step_m: 0.02`를 유지했다.
+
+#### 검증 결과
+
+| label | mean_score | worst_score | fail_rate | mean_runtime_sec |
+| --- | ---: | ---: | ---: | ---: |
+| `step_tune_0_02` | 58.693819 | 45.348719 | 0.000000 | 16.571230 |
+| `step_tune_0_015` | 58.693819 | 45.348719 | 0.000000 | 16.742166 |
+| `step_tune_0_01` | 58.693819 | 45.348719 | 0.000000 | 16.812937 |
+
+### 2026-07-03 - Stage 3 physics_mask 안전마진 검증
+
+#### 변경 목적
+
+휴리스틱의 `physics_mask` 안전마진이 과도하게 보수적인지 확인하되, geom 점수만이 아니라 PyBullet strict 검증을 함께 적용해 물리 실패 위험을 통제했다.
+
+#### 변경 내용
+
+- Stage 2 확정 config를 baseline으로 사용했다.
+- `com_margin_m`, `corner_tolerance_m`, `min_supported_corners`, `min_supported_edges`, `load_safety_margin` 후보를 하나씩만 변경했다.
+- 각 후보마다 geom 평가는 `--refresh-results`, strict 평가는 같은 결과에 `--physics --physics-strict`를 적용했다.
+- `load_safety_margin: 0.90`만 geom `mean_score`가 상승했고 strict `fail_rate`, `worst_score`가 baseline보다 나빠지지 않아 채택했다.
+- `com_margin_m`, `corner_tolerance_m`, `min_supported_corners`, `min_supported_edges`, `load_safety_margin: 0.95`는 채택 기준 미달로 원복했다.
+
+#### 검증 결과
+
+| label | geom_mean_score | strict_worst_score | strict_fail_rate | 판정 |
+| --- | ---: | ---: | ---: | --- |
+| `mask_tune_com_margin_0_003` | 58.298415 | 0.000000 | 0.050000 | 기각: geom 개선 없음 |
+| `mask_tune_com_margin_0_008` | 58.298415 | 0.000000 | 0.050000 | 기각: geom 개선 없음 |
+| `mask_tune_corner_tol_0_02` | 58.298415 | 45.348719 | 0.000000 | 기각: geom 개선 없음 |
+| `mask_tune_corner_tol_0_04` | 58.298415 | 0.000000 | 0.050000 | 기각: geom 개선 없음 |
+| `mask_tune_min_corners_1` | 58.298415 | 0.000000 | 0.050000 | 기각: geom 개선 없음 |
+| `mask_tune_min_edges_0` | 58.298415 | 0.000000 | 0.050000 | 기각: geom 개선 없음 |
+| `mask_tune_load_margin_0_90` | 58.693819 | 0.000000 | 0.050000 | 채택 |
+| `mask_tune_load_margin_0_95` | 58.187873 | 0.000000 | 0.050000 | 기각: geom 점수 하락 |
+
+### 2026-07-03 - Stage 2 종료조건 튜닝
+
+#### 변경 목적
+
+`should_finish()`가 남은 높이 또는 연속 실패 조건 때문에 조기에 종료되는지 확인하고, holdout_sku 기준 점수를 해치지 않는 범위에서 종료조건을 완화했다.
+
+#### 변경 내용
+
+- Stage 1 확정값인 `buffer.size: 4`와 `policy_inference.enabled: false`를 유지했다.
+- `min_remaining_height_m` 후보 0.02, 0.015와 `max_consecutive_failures` 후보 60, 80을 각각 하나씩 변경해 평가했다.
+- `min_remaining_height_m: 0.015`만 `mean_score`를 개선하고 `worst_score`, `fail_rate`를 유지했으므로 채택했다.
+- `max_consecutive_failures`는 40을 유지했다.
+
+#### 검증 결과
+
+| label | mean_score | worst_score | fail_rate | mean_runtime_sec |
+| --- | ---: | ---: | ---: | ---: |
+| `stop_tune_baseline_b4` | 57.799909 | 45.348719 | 0.000000 | 16.990853 |
+| `stop_tune_min_remaining_0_02` | 57.799909 | 45.348719 | 0.000000 | 16.856657 |
+| `stop_tune_min_remaining_0_015` | 58.298415 | 45.348719 | 0.000000 | 17.240209 |
+| `stop_tune_max_failures_60` | 57.799909 | 45.348719 | 0.000000 | 16.665060 |
+| `stop_tune_max_failures_80` | 57.799909 | 45.348719 | 0.000000 | 16.547663 |
+| `stop_tune_final_min_remaining_0_015` | 58.298415 | 45.348719 | 0.000000 | 16.655644 |
+
+Outlier seed 9002/9007/9011의 utilization은 각각 46.95%, 37.10%, 29.35%로 유지되었다. 개선은 주로 seed 9009, 9016, 9017에서 추가 배치가 가능해진 데서 발생했다.
+
+### 2026-07-03 - Stage 1 버퍼 크기 스윕
+
+#### 변경 목적
+
+holdout_sku 20개(seed 9000~9019) 기준으로 `buffer.size` 후보 4, 6, 8, 10, 12, 14, 16, 18, 20을 비교해, utilization 증가와 buffer bonus 감소를 함께 반영한 `mean_score` 최적점을 확정했다.
+
+#### 변경 내용
+
+- Stage 0 지시에 따라 `policy_inference.enabled`를 `false`로 변경해 휴리스틱만 평가했다.
+- 각 후보마다 `evaluate.py --refresh-results --results algorithm_results --label buffer_sweep_<N> --seed-set holdout_sku --bounds-tol 0.001 --epsilon 0.0011`로 결과 JSON을 갱신한 뒤 평가했다.
+- 최신 실행 기준 최고 `mean_score`는 `buffer_sweep_4`였으므로 `config/algorithm_config.yaml`의 `buffer.size`를 4로 확정했다.
+
+#### 검증 결과
+
+| label | mean_score | worst_score | fail_rate | mean_runtime_sec |
+| --- | ---: | ---: | ---: | ---: |
+| `buffer_sweep_4` | 57.799909 | 45.348719 | 0.000000 | 16.826443 |
+| `buffer_sweep_6` | 56.167238 | 40.505036 | 0.000000 | 26.555574 |
+| `buffer_sweep_8` | 54.942920 | 42.234553 | 0.000000 | 35.203147 |
+| `buffer_sweep_10` | 52.965917 | 31.736029 | 0.000000 | 43.255980 |
+| `buffer_sweep_12` | 53.829194 | 31.941854 | 0.000000 | 54.328468 |
+| `buffer_sweep_14` | 52.375253 | 37.377151 | 0.000000 | 66.091435 |
+| `buffer_sweep_16` | 50.913412 | 35.637011 | 0.000000 | 76.665843 |
+| `buffer_sweep_18` | 48.170656 | 33.637011 | 0.000000 | 86.572603 |
+| `buffer_sweep_20` | 46.844879 | 27.958597 | 0.000000 | 97.727608 |
+
 ### 2026-06-24 - 평가 도구 실행 가이드 문서 추가
 
 #### 변경 목적
